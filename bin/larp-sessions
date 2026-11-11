@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Find and read Claude Code conversations active during a larp session.
+
+  larp-sessions list <session_dir>          conversations with messages inside the session window
+  larp-sessions text <session_dir> <jsonl>  user/assistant text from 2 h before start to stop, no tool output
+"""
+import json, re, sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+PROJECTS = Path.home() / ".claude" / "projects"
+REMINDER = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+
+
+def window(session):
+    s = Path(session)
+    start = datetime.fromisoformat((s / "started").read_text().strip())
+    stop_f = s / "stopped"
+    stop = datetime.fromisoformat(stop_f.read_text().strip()) if stop_f.exists() else datetime.now(timezone.utc)
+    return start, stop
+
+
+def records(path):
+    with open(path, errors="replace") as f:
+        for line in f:
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
+def ts(rec):
+    t = rec.get("timestamp")
+    return datetime.fromisoformat(t.replace("Z", "+00:00")) if t else None
+
+
+def texts(rec):
+    c = (rec.get("message") or {}).get("content")
+    parts = [c] if isinstance(c, str) else [p.get("text", "") for p in c or [] if p.get("type") == "text"]
+    return [t for t in (REMINDER.sub("", p).strip() for p in parts) if t]
+
+
+def in_window(rec, start, stop):
+    t = ts(rec)
+    return (rec.get("type") in ("user", "assistant") and not rec.get("isSidechain")
+            and t is not None and start <= t <= stop)
+
+
+def cmd_list(session):
+    start, stop = window(session)
+    rows = []
+    for p in PROJECTS.glob("*/*.jsonl"):
+        if datetime.fromtimestamp(p.stat().st_mtime, timezone.utc) < start:
+            continue
+        title, cwd, n, first = "", "", 0, ""
+        for r in records(p):
+            if r.get("type") == "custom-title":
+                title = r.get("customTitle", title)
+            if in_window(r, start, stop):  # tool-only turns count too: Claude may work without writing text
+                cwd = r.get("cwd", cwd)
+                n += 1
+                if r["type"] == "user" and texts(r):
+                    first = first or texts(r)[0][:100].replace("\n", " ")
+        # Skip the larp editing conversation itself, which runs inside the session folder.
+        if n and not cwd.startswith(str(Path(session).resolve())):
+            rows.append({"file": str(p), "title": title or first, "cwd": cwd, "messages": n})
+    rows.sort(key=lambda r: -r["messages"])
+    print(json.dumps(rows, ensure_ascii=False, indent=1))
+
+
+def cmd_text(session, path, max_chars=40000):
+    start, stop = window(session)
+    # The task is usually explained to Claude before recording starts, so read some time before it.
+    start -= timedelta(hours=2)
+    out = [f"[{r['type']} {r['timestamp'][11:19]}] {t}\n" for r in records(path)
+           if in_window(r, start, stop) for t in texts(r)]
+    text = "\n".join(out)
+    print(text if len(text) <= max_chars else "[...earlier text cut...]\n" + text[-max_chars:])
+
+
+if __name__ == "__main__":
+    if len(sys.argv) >= 3 and sys.argv[1] == "list":
+        cmd_list(sys.argv[2])
+    elif len(sys.argv) >= 4 and sys.argv[1] == "text":
+        cmd_text(sys.argv[2], sys.argv[3])
+    else:
+        sys.exit(__doc__)

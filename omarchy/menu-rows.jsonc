@@ -1,0 +1,7 @@
+  // larp: work clip sessions (source: ~/Projects/larp)
+  "trigger.capture.larp": {"icon":"","label":"Work Clips","aliases":["larp"]},
+  "trigger.capture.larp.start": {"icon":"","label":"Start Recording","when":"! larp status","action":"larp start"},
+  "trigger.capture.larp.clip30": {"icon":"","label":"Clip 30s","when":"larp status","action":"larp clip 30"},
+  "trigger.capture.larp.clip60": {"icon":"","label":"Clip 1 min","when":"larp status","action":"larp clip 60"},
+  "trigger.capture.larp.clip300": {"icon":"","label":"Clip 5 min","when":"larp status","action":"larp clip 300"},
+  "trigger.capture.larp.stop": {"icon":"","label":"Stop Recording","when":"larp status","action":"larp stop"},

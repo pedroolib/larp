@@ -1,0 +1,80 @@
+#!/bin/bash
+# larp: replay-buffer screen recording sessions for daily work clips.
+# Usage: larp start | clip <seconds> | stop | status | menu
+set -euo pipefail
+
+BUFFER_SECONDS=300
+STATE_DIR="${XDG_RUNTIME_DIR:-$HOME/.local/state}/larp"
+SOCK="$STATE_DIR/gsr.sock"
+SESSION_FILE="$STATE_DIR/session"
+ROOT="${LARP_DIR:-$(xdg-user-dir VIDEOS 2>/dev/null || echo "$HOME/Videos")/larp}"
+
+notify() { omarchy-notification-send "$@" >/dev/null 2>&1 || notify-send "$@"; }
+running() { [[ -S $SOCK ]] && gsr-cli -ipc "$SOCK" status >/dev/null 2>&1; }
+session() { [[ -f $SESSION_FILE ]] && cat "$SESSION_FILE"; }
+
+start() {
+  if running; then notify "larp" "Ya hay una sesión grabando"; return; fi
+  mkdir -p "$STATE_DIR"
+  local dir="$ROOT/$(date +%Y-%m-%d_%H%M)"
+  mkdir -p "$dir/clips"
+  date -Iseconds >"$dir/started"
+  echo "$dir" >"$SESSION_FILE"
+  rm -f "$SOCK"
+  local monitor
+  monitor=$(hyprctl monitors -j | jq -r '.[] | select(.focused) | .name')
+  setsid gpu-screen-recorder -w "$monitor" -k auto -f 30 -fm cfr -c mp4 -cursor yes \
+    -r "$BUFFER_SECONDS" -replay-storage disk -restart-replay-on-save no \
+    -fallback-cpu-encoding yes -o "$dir/clips" -ipc "$SOCK" \
+    >"$dir/recorder.log" 2>&1 &
+  echo $! >"$STATE_DIR/pid"
+  for _ in $(seq 30); do running && break; sleep 0.2; done
+  if running; then
+    notify "larp: grabando" "Buffer de $((BUFFER_SECONDS / 60)) min activo. Super+Shift+R para clips."
+  else
+    notify -u critical "larp: no arrancó" "Revisa $dir/recorder.log"
+    rm -f "$SESSION_FILE"
+    return 1
+  fi
+}
+
+clip() {
+  local secs="${1:?seconds}" dir out
+  dir=$(session) || { notify "larp" "No hay sesión activa"; return 1; }
+  if ! running; then notify -u critical "larp" "La grabación no está corriendo"; return 1; fi
+  if ! out=$(gsr-cli -ipc "$SOCK" save-replay "$secs" 2>&1); then
+    notify -u critical "larp: falló el clip" "$out"
+    return 1
+  fi
+  # One line per clip: save time, requested length, file. The skill uses it to drop overlaps.
+  printf '%s\t%s\t%s\n' "$(date -Iseconds)" "$secs" "$out" >>"$dir/clips.tsv"
+  notify "larp: clip guardado" "Últimos ${secs}s ($(wc -l <"$dir/clips.tsv") en esta sesión)"
+}
+
+stop() {
+  local dir
+  dir=$(session) || { notify "larp" "No hay sesión activa"; return 0; }
+  running && gsr-cli -ipc "$SOCK" stop >/dev/null 2>&1 || true
+  # gsr-cli stop does not wait in replay mode, so wait for the process to exit.
+  local pid
+  pid=$(cat "$STATE_DIR/pid" 2>/dev/null || true)
+  for _ in $(seq 50); do [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+  date -Iseconds >"$dir/stopped"
+  rm -f "$SESSION_FILE" "$SOCK" "$STATE_DIR/pid"
+  if [[ ! -s $dir/clips.tsv ]]; then
+    notify "larp: sesión terminada" "Sin clips, no hay nada que editar"
+    return
+  fi
+  notify "larp: sesión terminada" "Abriendo Claude para editar"
+  omarchy-launch-tui --app-id=org.omarchy.larp "$SHELL" -lic \
+    "cd $(printf %q "$dir") && claude $(printf %q "/larp $dir"); exec $SHELL"
+}
+
+case "${1:-}" in
+start) start ;;
+clip) clip "${2:-}" ;;
+stop) stop ;;
+status) running ;;
+menu) omarchy-menu summon larp ;;
+*) echo "Usage: larp start | clip <seconds> | stop | status | menu" >&2; exit 2 ;;
+esac
